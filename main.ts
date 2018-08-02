@@ -73,7 +73,7 @@ class GridPos {
 const origin = new GridPos(0, 0, 0);
 
 type CellData = {
-    height: number
+    height: number,
 }
 
 const terra_map = new Map<GridPos, CellData>();
@@ -90,7 +90,7 @@ for (const neighbor of origin.neighbors()) {
     frontier.push({parent: origin, edge: neighbor});
 }
 
-while (terra_map.size < 300) {
+while (terra_map.size < 1500) {
     const heightDifference = () => Math.random() < 3/4 ? 0 : (Math.random() * 2 | 0)*2-1;
     const cellI = Math.random()*frontier.length | 0;
     const add = frontier[cellI];
@@ -373,8 +373,20 @@ function cross(u: Vec3, v: Vec3): Vec3 {
 function subtract(u: Vec3, v: Vec3): Vec3 {
     return [u[0] - v[0], u[1] - v[1], u[2] - v[2]];
 }
-function add(u: Vec3, v: Vec3): Vec3 {
-    return [u[0] + v[0], u[1] + v[1], u[2] + v[2]];
+function add(...us: Vec3[]): Vec3 {
+    const s: Vec3 = [0, 0, 0];
+    for (const u of us) {
+        s[0] += u[0];
+        s[1] += u[1];
+        s[2] += u[2];
+    }
+    return s;
+}
+function magnitude(v: Vec3): number {
+    return (v[0]**2 + v[1]**2 + v[2]**2)**0.5;
+}
+function distance(u: Vec3, v: Vec3): number {
+    return magnitude(subtract(u, v));
 }
 function lerp(u: Vec3, t: number, v: Vec3): Vec3 {
     return add(scale(t, v), scale(1-t, u));
@@ -669,8 +681,8 @@ gl.bindTexture(gl.TEXTURE_2D, pickColor);
 let doSelect: null | {x: number, y: number} = null;
 let selectedObject: null | number = null;
 let cameraCenter = {x: 0, z: 0};
-let cameraForwardTarget = 0;
-let cameraForward = 0;
+let cameraForwardDirectionTarget = 0;
+let cameraForwardDirection = 0;
 
 const mouse = {
     x: 0,
@@ -711,10 +723,10 @@ canvas.oncontextmenu = function(e) {
 };
 document.body.onkeydown = function(e) {
     if (e.key == "d") {
-        cameraForwardTarget += Math.PI / 3;
+        cameraForwardDirectionTarget += Math.PI / 6;
     }
     if (e.key == "a") {
-        cameraForwardTarget -= Math.PI / 3;
+        cameraForwardDirectionTarget -= Math.PI / 6;
     }
 }
 
@@ -731,20 +743,20 @@ function loop() {
     zoom = Math.exp(0.9 * Math.log(zoom) + 0.1 * Math.log(zoomTarget));
     const lookAngle = (90 - Math.log(zoom)*20) * Math.PI/180;
     const perspective = makePerspective({zoom});
-    cameraForward = cameraForward * 0.9 + cameraForwardTarget * 0.1;
-    if (mouse.down.right) {
-        cameraCenter.x += (mouse.dX*Math.sin(cameraForward) - mouse.dY*Math.cos(cameraForward)/Math.sin(lookAngle)) * 0.022 / zoom;
-        cameraCenter.z += (-mouse.dX*Math.cos(cameraForward) - mouse.dY*Math.sin(cameraForward)/Math.sin(lookAngle)) * 0.022 / zoom;
-    }
-    // tan(angle) = d
-    const forward: Vec3 = unit([Math.cos(cameraForward), -Math.tan(lookAngle), Math.sin(cameraForward)]);
-    // center + scale(t, forward) s.t. centerY + t*forward[1] == 0.5;
+    cameraForwardDirection = cameraForwardDirection * 0.9 + cameraForwardDirectionTarget * 0.1;
+    const forward: Vec3 = unit([Math.cos(cameraForwardDirection), -Math.tan(lookAngle), Math.sin(cameraForwardDirection)]);
     const centerY = 1.75;
     const cameraY = -3;
     const from = add([cameraCenter.x, centerY, cameraCenter.z], scale( (cameraY - centerY) / forward[1] , forward));
+    if (mouse.down.right) {
+        const viewSpanWidth = distance(from, supplyY([cameraCenter.x, cameraCenter.z], centerY)) * 2 / zoom;
+        const viewSpanHeight = viewSpanWidth / Math.sin(lookAngle);
+        const xPanSpeed = 1 / canvas.width * viewSpanWidth;
+        const yPanSpeed = 1 / canvas.width * viewSpanHeight;
+        cameraCenter.x += (mouse.dX*Math.sin(cameraForwardDirection)*xPanSpeed - mouse.dY*Math.cos(cameraForwardDirection)*yPanSpeed );
+        cameraCenter.z += (-mouse.dX*Math.cos(cameraForwardDirection)*xPanSpeed - mouse.dY*Math.sin(cameraForwardDirection)*yPanSpeed );
+    }
 
-    // const from: Vec3 = add([cameraCenter.x, 0.5, cameraCenter.z], scale(0.5, unit(withHeight(forward, 0))));
-    
     const [cam_orient, cam_pos] = makeCamera({from, forward});
 
     // Picking
