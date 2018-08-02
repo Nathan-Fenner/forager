@@ -155,7 +155,58 @@ debug_ctx.restore();
 
 const gl = canvas.getContext("webgl2")! as WebGLRenderingContext;
 
-const vertexPickSrc = `#version 300 es
+type GLType = "vec3" | "int" | "mat4";
+
+class GLProgram<Attributes extends {[attribute: string]: GLType}, Uniforms extends {[uniform: string]: GLType}> {
+    public readonly vertexShader: WebGLShader;
+    public readonly fragmentShader: WebGLShader;
+    public readonly program: WebGLProgram;
+    public readonly attributeLocations: {[attribute in keyof Attributes]: number};
+    constructor(
+        public readonly vertexSrc: string,
+        public readonly fragmentSrc: string,
+        public readonly attributes: Attributes,
+        public readonly uniforms: Uniforms,
+    ) {
+        this.vertexShader = gl.createShader(gl.VERTEX_SHADER)!;
+        this.fragmentShader = gl.createShader(gl.FRAGMENT_SHADER)!;
+
+        gl.shaderSource(this.vertexShader, this.vertexSrc);
+        gl.shaderSource(this.fragmentShader, this.fragmentSrc);
+
+        gl.compileShader(this.vertexShader);
+        if (!gl.getShaderParameter(this.vertexShader, gl.COMPILE_STATUS)) {
+            throw {message: "error loading vertex shader: " + gl.getShaderInfoLog(this.vertexShader)};
+        }
+
+        gl.compileShader(this.fragmentShader);
+        if (!gl.getShaderParameter(this.fragmentShader, gl.COMPILE_STATUS)) {
+            throw {message: "error loading fragment shader: " + gl.getShaderInfoLog(this.fragmentShader)};
+        }
+
+        this.program = gl.createProgram()!;
+        gl.attachShader(this.program, this.vertexShader);
+        gl.attachShader(this.program, this.fragmentShader);
+        gl.linkProgram(this.program);
+
+        if (!gl.getProgramParameter(this.program, gl.LINK_STATUS)) {
+            throw {message: "error linking program: " + gl.getProgramInfoLog(this.program)};
+        }
+
+        this.attributeLocations = {} as any;
+        for (const attr in attributes) {
+            this.attributeLocations[attr] = gl.getAttribLocation(this.program, attr);
+        }
+    }
+    use() {
+        gl.useProgram(this.program);
+    }
+    setUniform(uniform: keyof Uniforms, value: Float32Array) {
+        gl.uniformMatrix4fv(gl.getUniformLocation(this.program, uniform as string), false, value);
+    }
+}
+
+const pickProgram = new GLProgram(`#version 300 es
 
 precision mediump float;
 
@@ -176,7 +227,23 @@ void main() {
     v_obj = a_obj;
 }
 
-`;
+`, `#version 300 es
+
+precision mediump float;
+
+in vec3 v_pos;
+flat in int v_obj;
+
+out vec4 outColor;
+
+void main() {
+    int rInt = (v_obj / 400);
+    int gInt = (v_obj / 20) % 20;
+    int bInt = (v_obj) % 20;
+    outColor = vec4(float(rInt) / 20.0, float(gInt) / 20.0, float(bInt) / 20.0, 1.0);
+}
+
+`, {a_pos: "vec3", a_obj: "int"}, {camera_position: "mat4", camera_orientation: "mat4", camera_perspective: "mat4"});
 
 const vertexShaderSrc = `#version 300 es
 
@@ -205,25 +272,6 @@ void main() {
 }
 
 `;
-
-const fragmentPickSrc = `#version 300 es
-
-precision mediump float;
-
-in vec3 v_pos;
-flat in int v_obj;
-
-out vec4 outColor;
-
-void main() {
-    int rInt = (v_obj / 400);
-    int gInt = (v_obj / 20) % 20;
-    int bInt = (v_obj) % 20;
-    outColor = vec4(float(rInt) / 20.0, float(gInt) / 20.0, float(bInt) / 20.0, 1.0);
-}
-
-`;
-
 
 const fragmentShaderSrc = `#version 300 es
 
@@ -281,29 +329,11 @@ void main() {
 
 `;
 
-const vertexPick = gl.createShader(gl.VERTEX_SHADER)!;
-const fragmentPick = gl.createShader(gl.FRAGMENT_SHADER)!;
-
 const vertexShader = gl.createShader(gl.VERTEX_SHADER)!;
 const fragmentShader = gl.createShader(gl.FRAGMENT_SHADER)!;
 
-gl.shaderSource(vertexPick, vertexPickSrc);
-gl.shaderSource(fragmentPick, fragmentPickSrc);
-
 gl.shaderSource(vertexShader, vertexShaderSrc);
 gl.shaderSource(fragmentShader, fragmentShaderSrc);
-
-gl.compileShader(vertexPick);
-
-if (!gl.getShaderParameter(vertexPick, gl.COMPILE_STATUS)) {
-    throw {message: "error loading vertex shader: " + gl.getShaderInfoLog(vertexPick)};
-}
-
-gl.compileShader(fragmentPick);
-
-if (!gl.getShaderParameter(fragmentPick, gl.COMPILE_STATUS)) {
-    throw {message: "error loading fragment shader: " + gl.getShaderInfoLog(fragmentPick)};
-}
 
 gl.compileShader(vertexShader);
 
@@ -317,15 +347,6 @@ if (!gl.getShaderParameter(fragmentShader, gl.COMPILE_STATUS)) {
     throw {message: "error loading fragment shader: " + gl.getShaderInfoLog(fragmentShader)};
 }
 
-const programPick = gl.createProgram();
-gl.attachShader(programPick, vertexPick);
-gl.attachShader(programPick, fragmentPick);
-gl.linkProgram(programPick);
-
-if (!gl.getProgramParameter(programPick, gl.LINK_STATUS)) {
-    throw {message: "error linking programPick: " + gl.getProgramInfoLog(programPick)};
-}
-
 
 const program = gl.createProgram();
 gl.attachShader(program, vertexShader);
@@ -335,9 +356,6 @@ gl.linkProgram(program);
 if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
     throw {message: "error linking program: " + gl.getProgramInfoLog(program)};
 }
-
-const a_posPick = gl.getAttribLocation(programPick, "a_pos");
-const a_objPick = gl.getAttribLocation(programPick, "a_obj");
 
 const a_obj = gl.getAttribLocation(program, "a_obj");
 
@@ -596,6 +614,15 @@ for (const [cell, data] of terra_map) {
     }
 }
 
+type Resource = "power";
+const resource_map = new Map<GridPos, Resource>();
+
+for (const [p, _] of terra_map) {
+    if (Math.random() < 1/40) {
+        resource_map.set(p, "power");
+    }
+}
+
 for (let t = 0; t < triangle_pos.length; t += 9) {
     const a: Vec3 = [triangle_pos[t+0], triangle_pos[t+1], triangle_pos[t+2]];
     const b: Vec3 = [triangle_pos[t+3], triangle_pos[t+4], triangle_pos[t+5]];
@@ -635,24 +662,24 @@ function makePerspective(options: {zoom?: number}): number[] {
 }
 
 function makeCamera(options: {from: Vec3, forward: Vec3}): [number[], number[]] {
-        // TODO: allow roll
-        options.forward = unit(options.forward);
-        const right: Vec3 = unit(cross(options.forward, [0, 1, 0]));
-        const up: Vec3 = cross(options.forward, right);
-        return [
-            [
-                right[0], up[0], options.forward[0], 0,
-                right[1], up[1], options.forward[1], 0,
-                right[2], up[2], options.forward[2], 0,
-                0, 0, 0, 1,
-            ],
-            [
-                1, 0, 0, 0,
-                0, 1, 0, 0,
-                0, 0, 1, 0,
-                -options.from[0], -options.from[1], -options.from[2], 1,
-            ],
-        ];
+    // TODO: allow roll
+    options.forward = unit(options.forward);
+    const right: Vec3 = unit(cross(options.forward, [0, 1, 0]));
+    const up: Vec3 = cross(options.forward, right);
+    return [
+        [
+            right[0], up[0], options.forward[0], 0,
+            right[1], up[1], options.forward[1], 0,
+            right[2], up[2], options.forward[2], 0,
+            0, 0, 0, 1,
+        ],
+        [
+            1, 0, 0, 0,
+            0, 1, 0, 0,
+            0, 0, 1, 0,
+            -options.from[0], -options.from[1], -options.from[2], 1,
+        ],
+    ];
 }
 
 const pickBuffer = gl.createFramebuffer()!;
@@ -761,21 +788,23 @@ function loop() {
 
     // Picking
     gl.bindFramebuffer(gl.FRAMEBUFFER, pickBuffer);
-    gl.useProgram(programPick);
+    
+    pickProgram.use();
 
     gl.bindBuffer(gl.ARRAY_BUFFER, a_posPick_buffer);
-    gl.vertexAttribPointer(a_posPick, 3, gl.FLOAT, false, 0, 0);
-    gl.enableVertexAttribArray(a_posPick);
-
+    gl.enableVertexAttribArray(pickProgram.attributeLocations.a_pos);
+    gl.vertexAttribPointer(pickProgram.attributeLocations.a_pos, 3, gl.FLOAT, false, 0, 0);
+    
     gl.bindBuffer(gl.ARRAY_BUFFER, a_objPick_buffer);
-    (gl as any).vertexAttribIPointer(a_objPick, 1, gl.INT, false, 0, 0);
-    gl.enableVertexAttribArray(a_objPick);
+    gl.enableVertexAttribArray(pickProgram.attributeLocations.a_obj);
+    (gl as any).vertexAttribIPointer(pickProgram.attributeLocations.a_obj, 1, gl.INT, false, 0, 0);
+    
 
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     {
-        gl.uniformMatrix4fv(gl.getUniformLocation(programPick, "camera_perspective"), false, new Float32Array(perspective));
-        gl.uniformMatrix4fv(gl.getUniformLocation(programPick, "camera_orientation"), false, new Float32Array(cam_orient));
-        gl.uniformMatrix4fv(gl.getUniformLocation(programPick, "camera_position"), false, new Float32Array(cam_pos));
+        pickProgram.setUniform("camera_perspective", new Float32Array(perspective));
+        pickProgram.setUniform("camera_orientation", new Float32Array(cam_orient));
+        pickProgram.setUniform("camera_position", new Float32Array(cam_pos));
         gl.drawArrays(gl.TRIANGLES, 0, triangle_pos.length/3);
     }
     if (doSelect) {
