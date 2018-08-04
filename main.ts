@@ -154,9 +154,14 @@ for (const [p, data] of terra_map) {
 debug_ctx.restore();
 
 const gl = canvas.getContext("webgl2")! as WebGLRenderingContext;
+gl.enable(gl.DEPTH_TEST);
 
 type GLType = "vec3" | "int" | "mat4";
-
+type UniformMapping = {
+    vec3: Vec3,
+    int: number,
+    mat4: Float32Array,
+};
 class GLProgram<Attributes extends {[attribute: string]: GLType}, Uniforms extends {[uniform: string]: GLType}> {
     public readonly vertexShader: WebGLShader;
     public readonly fragmentShader: WebGLShader;
@@ -201,11 +206,109 @@ class GLProgram<Attributes extends {[attribute: string]: GLType}, Uniforms exten
     use() {
         gl.useProgram(this.program);
     }
-    setUniform(uniform: keyof Uniforms, value: Float32Array) {
-        gl.uniformMatrix4fv(gl.getUniformLocation(this.program, uniform as string), false, value);
+
+    setUniform<U extends keyof Uniforms>(uniform: U, value: UniformMapping[Uniforms[U]]) {
+        if (this.uniforms[uniform] == "mat4") {
+            gl.uniformMatrix4fv(gl.getUniformLocation(this.program, uniform as string), false, value as Float32Array);
+        } else if (this.uniforms[uniform] == "vec3") {
+            gl.uniform3f(gl.getUniformLocation(this.program, "view_position"), (value as Vec3)[0], (value as Vec3)[1], (value as Vec3)[2]);
+        } else if (this.uniforms[uniform] == "int") {
+            gl.uniform1i(gl.getUniformLocation(this.program, "u_selected"), selectedObject ? selectedObject : -1);
+        } else {
+            throw "unsupported uniform type"
+        }
+    }
+    setAttribute(attr: keyof Attributes, buffer: WebGLBuffer) {
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+        gl.enableVertexAttribArray(this.attributeLocations[attr]);
+        if (this.attributes[attr] == "vec3") {
+            gl.vertexAttribPointer(this.attributeLocations[attr], 3, gl.FLOAT, false, 0, 0);
+        } else if (this.attributes[attr] == "int") {
+            (gl as any).vertexAttribIPointer(this.attributeLocations[attr], 1, gl.INT, false, 0, 0);
+        } else {
+            throw "unsupported attribute type"
+        }
+    }
+    drawMesh<MeshAttributes extends Attributes>(mesh: Mesh<MeshAttributes>, options: {target: RenderTarget | "screen", clear: boolean, readPixels?: Uint8Array}) {
+        if (options.target == "screen") {
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        } else {
+            gl.bindFramebuffer(gl.FRAMEBUFFER, options.target.frameBuffer);
+        }
+        if (options.clear) {
+            gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+        }
+        // bind them, then draw
+        for (const attr in this.attributes) {
+            this.setAttribute(attr, mesh.buffers[attr]);
+        }
+        gl.drawArrays(gl.TRIANGLES, 0, mesh.size);
+        if (options.readPixels) {
+            gl.readPixels(0, 0, canvas.width, canvas.height, gl.RGBA, gl.UNSIGNED_BYTE, options.readPixels);
+        }
     }
 }
 
+class Mesh<Attributes extends {[attr: string]: GLType}> {
+    public readonly buffers: {[attr in keyof Attributes]: WebGLBuffer};
+    constructor(public readonly attributes: Attributes, public size: number) {
+        this.buffers = {} as any;
+        for (const attr in attributes) {
+            this.buffers[attr] = gl.createBuffer()!;
+        }
+    }
+    provide<Attribute extends keyof Attributes>(attr: Attribute, value: BufferArrayType[Attributes[Attribute]], draw: "static" | "dynamic" = "static") {
+        if (this.attributes[attr] == "vec3") {
+            if (value.length != 3 * this.size) {
+                throw "provide given wrong-size array (vec3)";
+            }
+        } else if (this.attributes[attr] == "mat4") {
+            if (value.length != 16 * this.size) {
+                throw "provide given wrong-size array (mat4)";
+            }
+        } else if (this.attributes[attr] == "int") {
+            if (value.length != this.size) {
+                throw "provide given wrong-size array (int)"
+            }
+        } else {
+            throw "unsupported attribute type";
+        }
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers[attr]);
+        gl.bufferData(gl.ARRAY_BUFFER, value, draw == "static" ? gl.STATIC_DRAW : gl.DYNAMIC_DRAW);
+    }
+}
+
+class RenderTarget {
+    public readonly frameBuffer: WebGLFramebuffer;
+    public readonly renderBuffer: WebGLRenderbuffer;
+    public readonly texture: WebGLTexture;
+    constructor() {
+        this.frameBuffer = gl.createFramebuffer()!;
+        if (this.frameBuffer == null) {
+            throw "no frame buffer";
+        }
+        gl.bindFramebuffer(gl.FRAMEBUFFER, this.frameBuffer);
+
+        this.renderBuffer = gl.createRenderbuffer()!;
+        gl.bindRenderbuffer(gl.RENDERBUFFER, this.renderBuffer); // create depth buffer
+        gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, canvas.width, canvas.height); // allocate space
+        gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, this.renderBuffer);
+
+
+        this.texture = gl.createTexture()!;
+        gl.bindTexture(gl.TEXTURE_2D, this.texture);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, canvas.width, canvas.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.texture, 0);
+        gl.bindTexture(gl.TEXTURE_2D, this.texture);
+    }
+}
+
+const pickTarget = new RenderTarget();
 const pickProgram = new GLProgram(`#version 300 es
 
 precision mediump float;
@@ -245,7 +348,7 @@ void main() {
 
 `, {a_pos: "vec3", a_obj: "int"}, {camera_position: "mat4", camera_orientation: "mat4", camera_perspective: "mat4"});
 
-const vertexShaderSrc = `#version 300 es
+const drawProgram = new GLProgram(`#version 300 es
 
 precision mediump float;
 
@@ -271,9 +374,7 @@ void main() {
     v_obj = a_obj;
 }
 
-`;
-
-const fragmentShaderSrc = `#version 300 es
+`, `#version 300 es
 
 precision mediump float;
 
@@ -312,7 +413,7 @@ out vec4 outColor;
 
 void main() {
     vec3 light_direction = normalize(vec3(1.0, -4.0, 1.0));
-    float lambert = max(0.1, dot(normalize(v_normal), light_direction));
+    float lambert = max(0.1, dot(normalize(v_normal), light_direction)*0.5 + 0.5);
     vec3 spec_normal = v_normal; // normalize( v_normal + 0.3 * noise(v_pos.xz) );
     float specular1 = pow(max(0.0, dot(reflect( normalize(view_position - v_pos), spec_normal ), -light_direction)), 10.0) * 0.125;
     float specular2 = pow(max(0.0, dot(reflect( normalize(view_position - v_pos), spec_normal ), -light_direction)), 100.0) * 0.25;
@@ -324,53 +425,10 @@ void main() {
         specular1 *= 3.0;
         specular2 *= 3.0;
     }
-    outColor = vec4(lambert * albedo + specular1 + specular2, 1.0);
+    vec3 color = lambert * albedo + specular1 + specular2;
+    outColor = vec4(pow(color, 1.0 / vec3(1.05, 1.05, 1.05)), 1.0);
 }
-
-`;
-
-const vertexShader = gl.createShader(gl.VERTEX_SHADER)!;
-const fragmentShader = gl.createShader(gl.FRAGMENT_SHADER)!;
-
-gl.shaderSource(vertexShader, vertexShaderSrc);
-gl.shaderSource(fragmentShader, fragmentShaderSrc);
-
-gl.compileShader(vertexShader);
-
-if (!gl.getShaderParameter(vertexShader, gl.COMPILE_STATUS)) {
-    throw {message: "error loading vertex shader: " + gl.getShaderInfoLog(vertexShader)};
-}
-
-gl.compileShader(fragmentShader);
-
-if (!gl.getShaderParameter(fragmentShader, gl.COMPILE_STATUS)) {
-    throw {message: "error loading fragment shader: " + gl.getShaderInfoLog(fragmentShader)};
-}
-
-
-const program = gl.createProgram();
-gl.attachShader(program, vertexShader);
-gl.attachShader(program, fragmentShader);
-gl.linkProgram(program);
-
-if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-    throw {message: "error linking program: " + gl.getProgramInfoLog(program)};
-}
-
-const a_obj = gl.getAttribLocation(program, "a_obj");
-
-const a_pos = gl.getAttribLocation(program, "a_pos");
-const a_color = gl.getAttribLocation(program, "a_color");
-const a_normal = gl.getAttribLocation(program, "a_normal");
-
-const a_posPick_buffer = gl.createBuffer()!;
-const a_objPick_buffer = gl.createBuffer()!;
-
-const a_pos_buffer = gl.createBuffer()!;
-const a_color_buffer = gl.createBuffer()!;
-const a_normal_buffer = gl.createBuffer()!;
-
-gl.enable(gl.DEPTH_TEST);
+`, {a_pos: "vec3", a_color: "vec3", a_normal: "vec3", a_obj: "int"}, {camera_perspective: "mat4", camera_orientation: "mat4", camera_position: "mat4", view_position: "vec3", u_selected: "int"});
 
 
 type Vec3 = [number, number, number];
@@ -448,6 +506,12 @@ function range(xs: number[]): number {
 
 let obj = 0;
 
+type BufferArrayType = {
+    vec3: Float32Array,
+    mat4: Float32Array,
+    int: Int32Array,
+}
+
 for (const [cell, data] of terra_map) {
     obj++;
     const colTop: Vec3 = [0.7, 0.7, 0.7]; // lerp([0.3, 0.3, 0.3], data.height/6, [0.9, 0.9, 0.9]);
@@ -478,7 +542,7 @@ for (const [cell, data] of terra_map) {
         const corner_ij = average(hex, ci, cj);
         const corner_jk = average(hex, cj, ck);
         const hs = [data.height, data_i.height, data_j.height];
-        
+
         if (range(hs) <= 1) {
             rim.push({type: "corner", side1: gi, side2: gj, p: withHeight(corner_ij, worldHeight(Math.max(...hs)/2+Math.min(...hs)/2))});
         } else {
@@ -575,7 +639,7 @@ for (const [cell, data] of terra_map) {
             // cliff
             const c = supplyY(cell.centerWorld(size), worldHeight(data.height));
             const mMiddle = lerp(supplyY(cell.centerWorld(size), worldHeight(data.height)), 0.5, supplyY(n.centerWorld(size), worldHeight(data.height)));
-            
+
             const out = unit(withHeight(subtract(mMiddle, c), 0));
             const side: Vec3 = [-out[2], 0, out[0]];
             for (let i = 0; i < 6; i += 2) {
@@ -589,7 +653,7 @@ for (const [cell, data] of terra_map) {
                 ];
 
                 const rim: Vec3[] = rimOrtho.map(p => withHeight(add(scale(p[0], out), scale(p[2], side)), p[1]));
-                
+
                 addQuad(
                     add(rim[3], m),
                     add(rim[2], m),
@@ -633,21 +697,17 @@ for (let t = 0; t < triangle_pos.length; t += 9) {
     triangle_normal.push(...normal);
 }
 
-gl.bindBuffer(gl.ARRAY_BUFFER, a_posPick_buffer);
-gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(triangle_pos), gl.STATIC_DRAW);
+const terrainMesh = new Mesh({
+    a_pos: "vec3",
+    a_obj: "int",
+    a_color: "vec3",
+    a_normal: "vec3",
+}, triangle_pos.length/3);
 
-gl.bindBuffer(gl.ARRAY_BUFFER, a_objPick_buffer);
-gl.bufferData(gl.ARRAY_BUFFER, new Int32Array(triangle_obj), gl.STATIC_DRAW);
-
-gl.bindBuffer(gl.ARRAY_BUFFER, a_pos_buffer);
-gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(triangle_pos), gl.STATIC_DRAW);
-
-gl.bindBuffer(gl.ARRAY_BUFFER, a_color_buffer);
-gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(triangle_col), gl.STATIC_DRAW);
-
-gl.bindBuffer(gl.ARRAY_BUFFER, a_normal_buffer);
-gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(triangle_normal), gl.STATIC_DRAW);
-
+terrainMesh.provide("a_pos", new Float32Array(triangle_pos));
+terrainMesh.provide("a_obj", new Int32Array(triangle_obj));
+terrainMesh.provide("a_color", new Float32Array(triangle_col));
+terrainMesh.provide("a_normal", new Float32Array(triangle_normal));
 
 function makePerspective(options: {zoom?: number}): number[] {
     const zoom = options.zoom || 1;
@@ -681,29 +741,6 @@ function makeCamera(options: {from: Vec3, forward: Vec3}): [number[], number[]] 
         ],
     ];
 }
-
-const pickBuffer = gl.createFramebuffer()!;
-if (pickBuffer == null) {
-    throw "no frame buffer";
-}
-gl.bindFramebuffer(gl.FRAMEBUFFER, pickBuffer);
-
-const pickDepthBuffer = gl.createRenderbuffer()!;
-gl.bindRenderbuffer(gl.RENDERBUFFER, pickDepthBuffer); // create depth buffer
-gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, canvas.width, canvas.height); // allocate space
-gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, pickDepthBuffer);
-
-
-const pickColor = gl.createTexture()!;
-gl.bindTexture(gl.TEXTURE_2D, pickColor);
-gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, canvas.width, canvas.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-
-gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, pickColor, 0);
-gl.bindTexture(gl.TEXTURE_2D, pickColor);
 
 let doSelect: null | {x: number, y: number} = null;
 let selectedObject: null | number = null;
@@ -763,7 +800,7 @@ let zoomTarget = 6;
 
 document.body.onwheel = function(e) {
     zoomTarget *= Math.exp(e.wheelDeltaY / 1000);
-    zoomTarget = Math.max(3, Math.min(30, zoomTarget));
+    zoomTarget = Math.max(3.5, Math.min(30, zoomTarget));
 }
 
 function loop() {
@@ -786,30 +823,17 @@ function loop() {
 
     const [cam_orient, cam_pos] = makeCamera({from, forward});
 
-    // Picking
-    gl.bindFramebuffer(gl.FRAMEBUFFER, pickBuffer);
-    
-    pickProgram.use();
 
-    gl.bindBuffer(gl.ARRAY_BUFFER, a_posPick_buffer);
-    gl.enableVertexAttribArray(pickProgram.attributeLocations.a_pos);
-    gl.vertexAttribPointer(pickProgram.attributeLocations.a_pos, 3, gl.FLOAT, false, 0, 0);
-    
-    gl.bindBuffer(gl.ARRAY_BUFFER, a_objPick_buffer);
-    gl.enableVertexAttribArray(pickProgram.attributeLocations.a_obj);
-    (gl as any).vertexAttribIPointer(pickProgram.attributeLocations.a_obj, 1, gl.INT, false, 0, 0);
-    
+    if (doSelect) {
+        // Picking
+        pickProgram.use();
 
-    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-    {
         pickProgram.setUniform("camera_perspective", new Float32Array(perspective));
         pickProgram.setUniform("camera_orientation", new Float32Array(cam_orient));
         pickProgram.setUniform("camera_position", new Float32Array(cam_pos));
-        gl.drawArrays(gl.TRIANGLES, 0, triangle_pos.length/3);
-    }
-    if (doSelect) {
+
         const pixelColors = new Uint8Array(canvas.width*canvas.height*4);
-        gl.readPixels(0, 0, canvas.width, canvas.height, gl.RGBA, gl.UNSIGNED_BYTE, pixelColors);
+        pickProgram.drawMesh(terrainMesh, {target: pickTarget, clear: true, readPixels: pixelColors});
         const i0 = pixelColors[(canvas.width*doSelect.y + doSelect.x)*4+0];
         const i1 = pixelColors[(canvas.width*doSelect.y + doSelect.x)*4+1];
         const i2 = pixelColors[(canvas.width*doSelect.y + doSelect.x)*4+2];
@@ -819,33 +843,16 @@ function loop() {
     }
 
     // Rendering
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    gl.useProgram(program);
 
-    gl.bindBuffer(gl.ARRAY_BUFFER, a_pos_buffer);
-    gl.vertexAttribPointer(a_pos, 3, gl.FLOAT, false, 0, 0);
-    gl.enableVertexAttribArray(a_pos);
-    gl.bindBuffer(gl.ARRAY_BUFFER, a_color_buffer);
-    gl.vertexAttribPointer(a_color, 3, gl.FLOAT, false, 0, 0);
-    gl.enableVertexAttribArray(a_color);
-    gl.bindBuffer(gl.ARRAY_BUFFER, a_normal_buffer);
-    gl.vertexAttribPointer(a_normal, 3, gl.FLOAT, false, 0, 0);
-    gl.enableVertexAttribArray(a_normal);
+    drawProgram.use();
 
-    gl.bindBuffer(gl.ARRAY_BUFFER, a_objPick_buffer);
-    (gl as any).vertexAttribIPointer(a_obj, 1, gl.INT, false, 0, 0);
-    gl.enableVertexAttribArray(a_obj);
+    drawProgram.setUniform("camera_perspective", new Float32Array(perspective));
+    drawProgram.setUniform("camera_orientation", new Float32Array(cam_orient));
+    drawProgram.setUniform("camera_position", new Float32Array(cam_pos));
+    drawProgram.setUniform("view_position", from);
+    drawProgram.setUniform("u_selected", selectedObject ? selectedObject : -1);
 
-    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-    {
-        gl.uniformMatrix4fv(gl.getUniformLocation(program, "camera_perspective"), false, new Float32Array(perspective));
-        gl.uniformMatrix4fv(gl.getUniformLocation(program, "camera_orientation"), false, new Float32Array(cam_orient));
-        gl.uniformMatrix4fv(gl.getUniformLocation(program, "camera_position"), false, new Float32Array(cam_pos));
-        gl.uniform3f(gl.getUniformLocation(program, "view_position"), from[0], from[1], from[2]);
-        gl.uniform1i(gl.getUniformLocation(program, "u_selected"), selectedObject ? selectedObject : -1);
-
-        gl.drawArrays(gl.TRIANGLES, 0, triangle_pos.length/3);
-    }
+    drawProgram.drawMesh(terrainMesh, {target: "screen", clear: true});
 
     mouse.dX = 0;
     mouse.dY = 0;
