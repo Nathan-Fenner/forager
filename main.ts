@@ -1,6 +1,3 @@
-import { debug } from "util";
-import { normalize } from "path";
-
 const canvas = document.getElementById("canvas") as HTMLCanvasElement;
 canvas.width = 600;
 canvas.height = 600;
