@@ -208,9 +208,9 @@ class GLProgram<Attributes extends {[attribute: string]: GLType}, Uniforms exten
         if (this.uniforms[uniform] == "mat4") {
             gl.uniformMatrix4fv(gl.getUniformLocation(this.program, uniform as string), false, value as Float32Array);
         } else if (this.uniforms[uniform] == "vec3") {
-            gl.uniform3f(gl.getUniformLocation(this.program, "view_position"), (value as Vec3)[0], (value as Vec3)[1], (value as Vec3)[2]);
+            gl.uniform3f(gl.getUniformLocation(this.program, uniform as string), (value as Vec3)[0], (value as Vec3)[1], (value as Vec3)[2]);
         } else if (this.uniforms[uniform] == "int") {
-            gl.uniform1i(gl.getUniformLocation(this.program, "u_selected"), selectedObject ? selectedObject : -1);
+            gl.uniform1i(gl.getUniformLocation(this.program, uniform as string), value as number);
         } else {
             throw "unsupported uniform type"
         }
@@ -384,28 +384,6 @@ uniform vec3 view_position;
 
 uniform int u_selected;
 
-float rand(vec2 c){
-	return fract(sin(dot(c.xy ,vec2(12.9898,78.233))) * 43758.5453);
-}
-vec3 dir(vec2 p) {
-    return vec3(rand(2. * p), rand(2. * p + 1.), rand(2. * p + vec2(1., 0.)));
-}
-vec3 val(vec2 c) {
-    vec2 f = fract(c);
-    vec2 b = c - f;
-    vec3 n00 = dir(b);
-    vec3 n01 = dir(b + vec2(0., 1.));
-    vec3 n10 = dir(b + vec2(1., 0.));
-    vec3 n11 = dir(b + vec2(1., 1.));
-
-    vec3 n0 = mix(n00, n01, f.y);
-    vec3 n1 = mix(n10, n11, f.y);
-    return mix(n0, n1, f.x);
-}
-vec3 noise(vec2 p) {
-    return val(p * 258.7) * 0.2 + val(p * 451.7) * 0.2 + val(p * 679.1) * 0.1;
-}
-
 out vec4 outColor;
 
 void main() {
@@ -417,12 +395,13 @@ void main() {
 
     vec3 albedo = v_color * exp( (2.0 - v_pos.y)*2.0 - 0.3 );
 
-    if (u_selected == v_obj) {
-        albedo = vec3(0.9, 0.8, 0.2);
-        specular1 *= 3.0;
-        specular2 *= 3.0;
-    }
     vec3 color = lambert * albedo + specular1 + specular2;
+
+    if (u_selected == v_obj) {
+        color *= 0.5;
+        color += vec3(0.4, 0.6, 0.8);
+    }
+    
     outColor = vec4(pow(color, 1.0 / vec3(1.05, 1.05, 1.05)), 1.0);
 }
 `, {a_pos: "vec3", a_color: "vec3", a_normal: "vec3", a_obj: "int"}, {camera_perspective: "mat4", camera_orientation: "mat4", camera_position: "mat4", view_position: "vec3", u_selected: "int"});
